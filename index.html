@@ -81,14 +81,14 @@
             flex: 1 1 auto;
             overflow-y: auto;
             overflow-x: hidden;
-            touch-action: pan-y pinch-zoom;
+            touch-action: pan-y;
             overscroll-behavior-x: none;
             -webkit-overflow-scrolling: touch;
             background: #f4f4f4;
         }
         #pdf-scroll.can-pan-x {
             overflow-x: auto;
-            touch-action: pan-x pan-y pinch-zoom;
+            touch-action: pan-x pan-y;
         }
         #pdf-pages {
             display: flex;
@@ -280,10 +280,12 @@
            nothing to move side to side.
            ------------------------------------------------------------------ */
 
-        const PAGE_GAP = 12;          // must match #pdf-pages gap
         const ZOOM_STEP = 1.25;
         const MAX_ZOOM_FACTOR = 4;    // relative to fit-width
         const MAX_CANVAS_DPR = 2;
+        const COMMIT_DELAY = 160;     // ms of quiet before re-rasterizing
+        const DOUBLE_TAP_MS = 300;
+        const DOUBLE_TAP_SLOP = 30;   // px between taps to still count as one spot
 
         if (window.pdfjsLib) {
             pdfjsLib.GlobalWorkerOptions.workerSrc =
@@ -305,6 +307,9 @@
             pagesEl: null
         };
 
+        let commitTimer = null;
+        let lastPinchEnd = 0;
+
         function buildViewerShell() {
             documentHolder.innerHTML = `
                 <div id="pdf-viewer">
@@ -325,8 +330,9 @@
             document.getElementById('pdf-zoom-in').addEventListener('click', () => zoomBy(ZOOM_STEP));
             pdf.scrollEl.addEventListener('scroll', updatePageIndicator, { passive: true });
             pdf.scrollEl.addEventListener('wheel', onWheel, { passive: false });
-            pdf.scrollEl.addEventListener('dblclick', toggleFit);
+            pdf.scrollEl.addEventListener('dblclick', (event) => toggleFit(anchorFromPoint(event.clientX, event.clientY)));
             attachPinchZoom(pdf.scrollEl);
+            attachDoubleTap(pdf.scrollEl);
         }
 
         function showMessage(text) {
@@ -345,13 +351,21 @@
             );
         }
 
-        function availableSpace() {
-            const styles = getComputedStyle(pdf.pagesEl);
-            const padX = parseFloat(styles.paddingLeft) + parseFloat(styles.paddingRight);
-            const padY = parseFloat(styles.paddingTop) + parseFloat(styles.paddingBottom);
+        function pagesPadding() {
+            const st = getComputedStyle(pdf.pagesEl);
             return {
-                width: Math.max(1, pdf.scrollEl.clientWidth - padX),
-                height: Math.max(1, pdf.scrollEl.clientHeight - padY)
+                left: parseFloat(st.paddingLeft) || 0,
+                right: parseFloat(st.paddingRight) || 0,
+                top: parseFloat(st.paddingTop) || 0,
+                bottom: parseFloat(st.paddingBottom) || 0
+            };
+        }
+
+        function availableSpace() {
+            const pad = pagesPadding();
+            return {
+                width: Math.max(1, pdf.scrollEl.clientWidth - pad.left - pad.right),
+                height: Math.max(1, pdf.scrollEl.clientHeight - pad.top - pad.bottom)
             };
         }
 
@@ -374,49 +388,135 @@
             return Math.min(Math.max(scale, fitPageScale()), fitWidthScale() * MAX_ZOOM_FACTOR);
         }
 
+        // Remembers what sits under a given viewport point in unscaled document
+        // coordinates, so a zoom can put it back under that same point. Without
+        // this, zooming walks the page away from whatever you were reading.
+        function anchorFromPoint(clientX, clientY) {
+            const rect = pdf.scrollEl.getBoundingClientRect();
+            return anchorAt(clientX - rect.left, clientY - rect.top);
+        }
+
+        function anchorAt(viewX, viewY) {
+            const pad = pagesPadding();
+            return {
+                viewX, viewY,
+                padLeft: pad.left,
+                padTop: pad.top,
+                docX: (pdf.scrollEl.scrollLeft + viewX - pad.left) / pdf.scale,
+                docY: (pdf.scrollEl.scrollTop + viewY - pad.top) / pdf.scale
+            };
+        }
+
+        function restoreAnchor(anchor) {
+            if (!anchor) return;
+            pdf.scrollEl.scrollTop = Math.max(0, anchor.docY * pdf.scale + anchor.padTop - anchor.viewY);
+            pdf.scrollEl.scrollLeft = Math.max(0, anchor.docX * pdf.scale + anchor.padLeft - anchor.viewX);
+        }
+
+        function centreAnchor() {
+            return anchorAt(pdf.scrollEl.clientWidth / 2, pdf.scrollEl.clientHeight / 2);
+        }
+
         function zoomBy(factor) {
             if (!pdf.doc) return;
-            setScale(pdf.scale * factor, 'manual');
+            setScale(pdf.scale * factor, 'manual', centreAnchor());
         }
 
-        function toggleFit() {
+        // Double-click / double-tap cycles fit-page -> fit-width -> 2x, then
+        // back to fit-page, anchored on the point you hit. On a phone the first
+        // two coincide (the page is width-bound either way), so it collapses to
+        // the native-feeling "tap to zoom in on this spot, tap again to go
+        // back" rather than doing nothing.
+        function toggleFit(anchor) {
             if (!pdf.doc) return;
-            const goingWide = Math.abs(pdf.scale - fitPageScale()) < 0.01;
-            setScale(goingWide ? fitWidthScale() : fitPageScale(), goingWide ? 'fit-width' : 'fit-page');
+            const fitWidth = fitWidthScale();
+            const readable = fitWidth * 2;
+
+            let target, mode;
+            if (pdf.scale < fitWidth - 0.01) {
+                target = fitWidth; mode = 'fit-width';
+            } else if (pdf.scale < readable - 0.01) {
+                target = readable; mode = 'manual';
+            } else {
+                target = fitPageScale(); mode = 'fit-page';
+            }
+            setScale(target, mode, anchor || centreAnchor());
         }
 
-        function setScale(scale, mode) {
+        function setScale(scale, mode, anchor) {
             const next = clampScale(scale);
             if (Math.abs(next - pdf.scale) < 0.0005 && mode === pdf.mode) return;
-
-            // Hold the current reading position across the zoom.
-            const anchor = pdf.scrollEl.scrollHeight > 0
-                ? (pdf.scrollEl.scrollTop + pdf.scrollEl.clientHeight / 2) / pdf.scrollEl.scrollHeight
-                : 0;
-
+            clearTimeout(commitTimer);
             pdf.scale = next;
             pdf.mode = mode;
             layoutPages();
-
-            pdf.scrollEl.scrollTop = Math.max(
-                0, anchor * pdf.scrollEl.scrollHeight - pdf.scrollEl.clientHeight / 2
-            );
+            restoreAnchor(anchor);
         }
 
-        // Sizes every page box for the current scale, drops already-rendered
-        // canvases (they are for the old scale) and re-arms lazy rendering.
-        function layoutPages() {
-            pdf.seq++;
-            const seq = pdf.seq;
-
+        // Resizing a box also rescales the canvas already inside it -- the
+        // canvas is width:100%/height:100% of its box -- so the zoom is visible
+        // immediately without touching pdf.js. That is what makes a continuous
+        // gesture smooth: geometry now, pixels later.
+        function setPageSizes() {
             pdf.boxes.forEach((box, i) => {
                 const size = pdf.sizes[i];
                 box.style.width = Math.max(1, Math.round(size.width * pdf.scale)) + 'px';
                 box.style.height = Math.max(1, Math.round(size.height * pdf.scale)) + 'px';
+            });
+        }
+
+        // Marks every page as needing a repaint at the current scale. The
+        // stretched canvases deliberately stay on screen as stand-ins until
+        // their replacements are ready, so zooming never flashes blank pages.
+        function invalidateRenders() {
+            pdf.seq++;
+            pdf.boxes.forEach(box => {
                 if (box._task) { try { box._task.cancel(); } catch (e) {} box._task = null; }
-                box.innerHTML = '';
                 box._rendered = false;
             });
+            return pdf.seq;
+        }
+
+        // Live part of a gesture: new geometry, no rasterizing. The crisp
+        // re-render follows once the fingers (or the wheel) go quiet.
+        function previewScale(scale, anchor) {
+            const next = clampScale(scale);
+            if (Math.abs(next - pdf.scale) < 0.0005) return;
+
+            pdf.scale = next;
+            pdf.mode = 'manual';
+            setPageSizes();
+            restoreAnchor(anchor);
+            updateHorizontalPanning();
+            updateZoomControls();
+            scheduleCommit();
+        }
+
+        function scheduleCommit() {
+            clearTimeout(commitTimer);
+            commitTimer = setTimeout(commitScale, COMMIT_DELAY);
+        }
+
+        function commitScale(anchor) {
+            clearTimeout(commitTimer);
+            if (!pdf.doc || !pdf.scrollEl) return;
+            const keep = anchor || centreAnchor();
+            layoutPages();
+            restoreAnchor(keep);
+        }
+
+        function layoutPages() {
+            setPageSizes();
+
+            // Laying the pages out can introduce a vertical scrollbar, which
+            // narrows the viewport the fit scale was measured against. Re-fit
+            // once so "fit" never leaves a sliver of horizontal scroll behind.
+            if (pdf.mode !== 'manual' && pdf.pagesEl.scrollWidth > pdf.scrollEl.clientWidth + 1) {
+                pdf.scale = pdf.mode === 'fit-width' ? fitWidthScale() : fitPageScale();
+                setPageSizes();
+            }
+
+            const seq = invalidateRenders();
 
             updateHorizontalPanning();
             updateZoomControls();
@@ -458,10 +558,11 @@
             if (!indicator || !pdf.doc) return;
 
             const mid = pdf.scrollEl.scrollTop + pdf.scrollEl.clientHeight / 2;
+            const gap = parseFloat(getComputedStyle(pdf.pagesEl).rowGap) || 0;
             let current = 1;
-            let offset = parseFloat(getComputedStyle(pdf.pagesEl).paddingTop) || 0;
+            let offset = pagesPadding().top;
             for (let i = 0; i < pdf.boxes.length; i++) {
-                offset += pdf.boxes[i].offsetHeight + PAGE_GAP;
+                offset += pdf.boxes[i].offsetHeight + gap;
                 if (mid < offset) { current = i + 1; break; }
                 current = i + 1;
             }
@@ -497,36 +598,109 @@
             }
         }
 
-        // Ctrl/Cmd + wheel zooms (trackpad pinch arrives this way); a plain
-        // wheel is left alone so it keeps scrolling the document.
+        // Ctrl/Cmd + wheel zooms (a trackpad pinch arrives this way); a plain
+        // wheel is left alone so it keeps scrolling the document. The
+        // exponential step keeps a trackpad's many small deltas continuous
+        // instead of snapping a notch per event.
         function onWheel(event) {
             if (!event.ctrlKey && !event.metaKey) return;
             event.preventDefault();
-            zoomBy(event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP);
+            if (!pdf.doc) return;
+            const delta = Math.max(-50, Math.min(50, event.deltaY));
+            previewScale(pdf.scale * Math.exp(-delta / 150), anchorFromPoint(event.clientX, event.clientY));
         }
 
+        // Pinch: resize the boxes live and re-rasterize only once the fingers
+        // lift, so the gesture tracks at frame rate instead of stalling on a
+        // render. The midpoint is followed as it moves, so a pinch that drifts
+        // also pans, the way a native viewer behaves.
         function attachPinchZoom(el) {
-            let startDistance = 0;
-            let startScale = 1;
+            let pinch = null;
+            let frame = null;
 
-            const distance = (touches) => Math.hypot(
-                touches[0].clientX - touches[1].clientX,
-                touches[0].clientY - touches[1].clientY
-            );
+            const spread = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+            const midpoint = (t) => ({ x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 });
 
             el.addEventListener('touchstart', (event) => {
                 if (event.touches.length !== 2 || !pdf.doc) return;
-                startDistance = distance(event.touches);
-                startScale = pdf.scale;
+                clearTimeout(commitTimer);
+                const mid = midpoint(event.touches);
+                pinch = {
+                    startSpread: spread(event.touches) || 1,
+                    startScale: pdf.scale,
+                    anchor: anchorFromPoint(mid.x, mid.y),
+                    pending: pdf.scale
+                };
             }, { passive: true });
 
             el.addEventListener('touchmove', (event) => {
-                if (event.touches.length !== 2 || !startDistance || !pdf.doc) return;
-                event.preventDefault();
-                setScale(startScale * (distance(event.touches) / startDistance), 'manual');
+                if (!pinch || event.touches.length !== 2) return;
+                event.preventDefault();   // this gesture is ours, not the browser's
+
+                const rect = el.getBoundingClientRect();
+                const mid = midpoint(event.touches);
+                pinch.anchor.viewX = mid.x - rect.left;
+                pinch.anchor.viewY = mid.y - rect.top;
+                pinch.pending = pinch.startScale * (spread(event.touches) / pinch.startSpread);
+
+                if (frame) return;
+                frame = requestAnimationFrame(() => {
+                    frame = null;
+                    if (pinch) previewScale(pinch.pending, pinch.anchor);
+                });
             }, { passive: false });
 
-            el.addEventListener('touchend', () => { startDistance = 0; }, { passive: true });
+            const finish = () => {
+                if (!pinch) return;
+                if (frame) { cancelAnimationFrame(frame); frame = null; }
+                const anchor = pinch.anchor;
+                const pending = pinch.pending;
+                pinch = null;
+                lastPinchEnd = Date.now();
+                pdf.scale = clampScale(pending);
+                pdf.mode = 'manual';
+                setPageSizes();
+                commitScale(anchor);
+            };
+
+            el.addEventListener('touchend', finish, { passive: true });
+            el.addEventListener('touchcancel', finish, { passive: true });
+
+            // Safari synthesises these alongside touch events; swallow them so
+            // the page itself does not zoom underneath us.
+            ['gesturestart', 'gesturechange', 'gestureend'].forEach(type => {
+                el.addEventListener(type, (e) => e.preventDefault());
+            });
+        }
+
+        // Double-tap mirrors the desktop double-click fit toggle. With
+        // touch-action locked down the browser will not synthesise a dblclick,
+        // so detect it ourselves -- and ignore the taps that are really just
+        // fingers coming off a pinch.
+        function attachDoubleTap(el) {
+            let lastTap = 0;
+            let lastPoint = null;
+
+            el.addEventListener('touchend', (event) => {
+                if (!pdf.doc) return;
+                if (event.changedTouches.length !== 1 || event.touches.length !== 0) return;
+                if (Date.now() - lastPinchEnd < 400) { lastTap = 0; lastPoint = null; return; }
+
+                const touch = event.changedTouches[0];
+                const now = Date.now();
+                const nearby = lastPoint &&
+                    Math.hypot(touch.clientX - lastPoint.x, touch.clientY - lastPoint.y) < DOUBLE_TAP_SLOP;
+
+                if (now - lastTap < DOUBLE_TAP_MS && nearby) {
+                    event.preventDefault();
+                    toggleFit(anchorFromPoint(touch.clientX, touch.clientY));
+                    lastTap = 0;
+                    lastPoint = null;
+                    return;
+                }
+                lastTap = now;
+                lastPoint = { x: touch.clientX, y: touch.clientY };
+            }, { passive: false });
         }
 
         function nativeEmbedFallback(url) {
@@ -547,6 +721,7 @@
 
             pdf.seq++;
             const seq = pdf.seq;
+            clearTimeout(commitTimer);
             if (pdf.observer) { pdf.observer.disconnect(); pdf.observer = null; }
             if (pdf.doc) { pdf.doc.destroy(); pdf.doc = null; }
             pdf.boxes = [];
