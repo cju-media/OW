@@ -3,6 +3,7 @@
 <head>
     <title>OW Viewer</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
     <style>
         html, body {
             margin: 0;
@@ -92,25 +93,115 @@
             box-sizing: border-box;
             background: #f9f9f9;
         }
+        #pdf-viewer {
+            display: flex;
+            flex-direction: column;
+            width: 94%;
+            max-width: 900px;
+            height: 100%;
+            background: #fff;
+            border: none;
+            border-radius: 6px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+            overflow: hidden;
+        }
+        #pdf-toolbar {
+            flex: 0 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            padding: 6px 10px;
+            background: #fafafa;
+            border-bottom: 1px solid #eee;
+            font-size: 13px;
+            color: #555;
+            user-select: none;
+        }
+        #pdf-toolbar button {
+            font: inherit;
+            line-height: 1;
+            width: 28px;
+            height: 26px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background: #fff;
+            color: #333;
+            cursor: pointer;
+        }
+        #pdf-toolbar button:hover:not(:disabled) { background: #f0f0f0; }
+        #pdf-toolbar button:disabled { opacity: 0.4; cursor: default; }
+        #pdf-zoom-level { min-width: 44px; text-align: center; font-variant-numeric: tabular-nums; }
+        #pdf-page-indicator { font-variant-numeric: tabular-nums; }
+        .pdf-toolbar-divider { width: 1px; height: 16px; background: #ddd; }
+
+        /* The scroller only ever scrolls vertically unless the page is actually
+           wider than the viewport (i.e. the user zoomed in past fit-width), so
+           at minimum zoom there is nothing to pan sideways. */
+        #pdf-scroll {
+            flex: 1 1 auto;
+            overflow-y: auto;
+            overflow-x: hidden;
+            touch-action: pan-y pinch-zoom;
+            overscroll-behavior-x: none;
+            -webkit-overflow-scrolling: touch;
+            background: #f4f4f4;
+        }
+        #pdf-scroll.can-pan-x {
+            overflow-x: auto;
+            touch-action: pan-x pan-y pinch-zoom;
+        }
+        #pdf-pages {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 12px;
+            width: max-content;
+            min-width: 100%;
+            padding: 12px;
+            box-sizing: border-box;
+            margin: 0 auto;
+        }
+        .pdf-page {
+            flex: 0 0 auto;
+            background: #fff;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.18);
+            overflow: hidden;
+        }
+        .pdf-page canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+        #pdf-message {
+            flex: 1 1 auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #777;
+            font-size: 14px;
+        }
+        /* Fallback embed, used only if pdf.js is unavailable. */
         .native-pdf-object {
             width: 94% !important;
-            max-width: 900px;      
+            max-width: 900px;
             height: 100%;
             border: none;
             background: #fff;
             box-shadow: 0 4px 12px rgba(0,0,0,0.05);
             border-radius: 6px;
         }
-        
+
         @media (max-width: 767px) {
             #ow-document-holder {
-                height: 720px; 
+                height: 720px;
                 padding: 10px 0;
             }
-            .native-pdf-object {
+            #pdf-viewer, .native-pdf-object {
                 width: 95% !important;
                 border-radius: 4px;
             }
+            #pdf-pages { padding: 8px; gap: 8px; }
         }
     </style>
 </head>
@@ -409,6 +500,362 @@
             }
         }
 
+        /* ------------------------------------------------------------------
+           PDF rendering
+
+           Replaces the browser's built-in PDF plugin with a pdf.js canvas
+           viewer. The plugin let you drag the page sideways even when it was
+           fully zoomed out; here the scroller is vertical-only unless the page
+           is genuinely wider than the viewport, so at minimum zoom there is
+           nothing to move side to side.
+           ------------------------------------------------------------------ */
+
+        const ZOOM_STEP = 1.25;
+        const MAX_ZOOM_FACTOR = 4;    // relative to fit-width
+        const MAX_CANVAS_DPR = 2;
+
+        if (window.pdfjsLib) {
+            pdfjsLib.GlobalWorkerOptions.workerSrc =
+                'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        }
+
+        // Everything about the document currently on screen. `seq` is bumped on
+        // every load/zoom so in-flight renders from a superseded state can be
+        // thrown away instead of painting over the new one.
+        const pdf = {
+            doc: null,
+            sizes: [],      // unscaled {width, height} per page
+            boxes: [],      // .pdf-page elements, one per page
+            scale: 1,
+            mode: 'fit-page', // 'fit-page' | 'fit-width' | 'manual'
+            seq: 0,
+            observer: null,
+            scrollEl: null,
+            pagesEl: null
+        };
+
+        function buildViewerShell() {
+            documentHolder.innerHTML = `
+                <div id="pdf-viewer">
+                    <div id="pdf-toolbar">
+                        <button id="pdf-zoom-out" type="button" title="Zoom out" aria-label="Zoom out">&minus;</button>
+                        <span id="pdf-zoom-level">100%</span>
+                        <button id="pdf-zoom-in" type="button" title="Zoom in" aria-label="Zoom in">+</button>
+                        <span class="pdf-toolbar-divider"></span>
+                        <span id="pdf-page-indicator">&nbsp;</span>
+                    </div>
+                    <div id="pdf-scroll"><div id="pdf-pages"></div></div>
+                </div>
+            `;
+            pdf.scrollEl = document.getElementById('pdf-scroll');
+            pdf.pagesEl = document.getElementById('pdf-pages');
+
+            document.getElementById('pdf-zoom-out').addEventListener('click', () => zoomBy(1 / ZOOM_STEP));
+            document.getElementById('pdf-zoom-in').addEventListener('click', () => zoomBy(ZOOM_STEP));
+            pdf.scrollEl.addEventListener('scroll', updatePageIndicator, { passive: true });
+            pdf.scrollEl.addEventListener('wheel', onWheel, { passive: false });
+            pdf.scrollEl.addEventListener('dblclick', toggleFit);
+            attachPinchZoom(pdf.scrollEl);
+        }
+
+        function showMessage(text) {
+            documentHolder.innerHTML = `<div id="pdf-viewer"><div id="pdf-message">${text}</div></div>`;
+            pdf.scrollEl = null;
+            pdf.pagesEl = null;
+        }
+
+        // Widest / tallest page in the document, so a mixed-size PDF (we have
+        // both letter bulletins and 11x17 spreads) is laid out against a single
+        // scale and never needs horizontal room for only some of its pages.
+        function maxPageSize() {
+            return pdf.sizes.reduce(
+                (acc, s) => ({ width: Math.max(acc.width, s.width), height: Math.max(acc.height, s.height) }),
+                { width: 1, height: 1 }
+            );
+        }
+
+        function availableSpace() {
+            const styles = getComputedStyle(pdf.pagesEl);
+            const padX = parseFloat(styles.paddingLeft) + parseFloat(styles.paddingRight);
+            const padY = parseFloat(styles.paddingTop) + parseFloat(styles.paddingBottom);
+            return {
+                width: Math.max(1, pdf.scrollEl.clientWidth - padX),
+                height: Math.max(1, pdf.scrollEl.clientHeight - padY)
+            };
+        }
+
+        function fitWidthScale() {
+            return availableSpace().width / maxPageSize().width;
+        }
+
+        // Whole page visible. Always <= fit-width, so it never overflows sideways.
+        function fitPageScale() {
+            const space = availableSpace();
+            const size = maxPageSize();
+            return Math.min(space.width / size.width, space.height / size.height);
+        }
+
+        // Zooming out stops at fit-page and zooming in stops at 4x fit-width.
+        // The lower bound is the important half: below fit-width the rendered
+        // page is never wider than the scroller, so horizontal panning is
+        // impossible rather than merely discouraged.
+        function clampScale(scale) {
+            return Math.min(Math.max(scale, fitPageScale()), fitWidthScale() * MAX_ZOOM_FACTOR);
+        }
+
+        function zoomBy(factor) {
+            if (!pdf.doc) return;
+            setScale(pdf.scale * factor, 'manual');
+        }
+
+        function toggleFit() {
+            if (!pdf.doc) return;
+            const goingWide = Math.abs(pdf.scale - fitPageScale()) < 0.01;
+            setScale(goingWide ? fitWidthScale() : fitPageScale(), goingWide ? 'fit-width' : 'fit-page');
+        }
+
+        function setScale(scale, mode) {
+            const next = clampScale(scale);
+            if (Math.abs(next - pdf.scale) < 0.0005 && mode === pdf.mode) return;
+
+            // Hold the current reading position across the zoom.
+            const anchor = pdf.scrollEl.scrollHeight > 0
+                ? (pdf.scrollEl.scrollTop + pdf.scrollEl.clientHeight / 2) / pdf.scrollEl.scrollHeight
+                : 0;
+
+            pdf.scale = next;
+            pdf.mode = mode;
+            layoutPages();
+
+            pdf.scrollEl.scrollTop = Math.max(
+                0, anchor * pdf.scrollEl.scrollHeight - pdf.scrollEl.clientHeight / 2
+            );
+        }
+
+        // Sizes every page box for the current scale, drops already-rendered
+        // canvases (they are for the old scale) and re-arms lazy rendering.
+        function applyPageSizes() {
+            pdf.boxes.forEach((box, i) => {
+                const size = pdf.sizes[i];
+                box.style.width = Math.max(1, Math.round(size.width * pdf.scale)) + 'px';
+                box.style.height = Math.max(1, Math.round(size.height * pdf.scale)) + 'px';
+                if (box._task) { try { box._task.cancel(); } catch (e) {} box._task = null; }
+                box.innerHTML = '';
+                box._rendered = false;
+            });
+        }
+
+        function layoutPages() {
+            pdf.seq++;
+            const seq = pdf.seq;
+
+            applyPageSizes();
+
+            // Laying the pages out can introduce a vertical scrollbar, which
+            // narrows the viewport the fit scale was measured against. Re-fit
+            // once so "fit" never leaves a sliver of horizontal scroll behind.
+            if (pdf.mode !== 'manual' && pdf.pagesEl.scrollWidth > pdf.scrollEl.clientWidth + 1) {
+                pdf.scale = pdf.mode === 'fit-width' ? fitWidthScale() : fitPageScale();
+                applyPageSizes();
+            }
+
+            updateHorizontalPanning();
+            updateZoomControls();
+            updatePageIndicator();
+
+            // Whatever is on screen right now gets painted immediately; the
+            // observer picks up the rest as the reader scrolls.
+            if (pdf.observer) {
+                pdf.boxes.forEach(box => pdf.observer.unobserve(box));
+                pdf.boxes.forEach(box => pdf.observer.observe(box));
+            } else {
+                pdf.boxes.forEach((box, i) => renderPage(box, i + 1, seq));
+            }
+        }
+
+        // The whole point of the exercise: horizontal scrolling exists only
+        // while the page is actually wider than the viewport.
+        function updateHorizontalPanning() {
+            const overflows = pdf.pagesEl.scrollWidth > pdf.scrollEl.clientWidth + 1;
+            pdf.scrollEl.classList.toggle('can-pan-x', overflows);
+            if (!overflows) pdf.scrollEl.scrollLeft = 0;
+        }
+
+        function updateZoomControls() {
+            const zoomOut = document.getElementById('pdf-zoom-out');
+            const zoomIn = document.getElementById('pdf-zoom-in');
+            const label = document.getElementById('pdf-zoom-level');
+            if (!zoomOut || !zoomIn || !label) return;
+
+            const min = fitPageScale();
+            const max = fitWidthScale() * MAX_ZOOM_FACTOR;
+            zoomOut.disabled = pdf.scale <= min + 0.0005;
+            zoomIn.disabled = pdf.scale >= max - 0.0005;
+            label.innerText = Math.round((pdf.scale / fitWidthScale()) * 100) + '%';
+        }
+
+        function updatePageIndicator() {
+            const indicator = document.getElementById('pdf-page-indicator');
+            if (!indicator || !pdf.doc) return;
+
+            const mid = pdf.scrollEl.scrollTop + pdf.scrollEl.clientHeight / 2;
+            let current = 1;
+            const styles = getComputedStyle(pdf.pagesEl);
+            const gap = parseFloat(styles.rowGap) || 0;
+            let offset = parseFloat(styles.paddingTop) || 0;
+            for (let i = 0; i < pdf.boxes.length; i++) {
+                offset += pdf.boxes[i].offsetHeight + gap;
+                if (mid < offset) { current = i + 1; break; }
+                current = i + 1;
+            }
+            indicator.innerText = `${current} / ${pdf.doc.numPages}`;
+        }
+
+        async function renderPage(box, pageNumber, seq) {
+            if (box._rendered || seq !== pdf.seq) return;
+            box._rendered = true;
+            try {
+                const page = await pdf.doc.getPage(pageNumber);
+                if (seq !== pdf.seq) return;
+
+                const dpr = Math.min(window.devicePixelRatio || 1, MAX_CANVAS_DPR);
+                const viewport = page.getViewport({ scale: pdf.scale * dpr });
+                const canvas = document.createElement('canvas');
+                canvas.width = Math.max(1, Math.floor(viewport.width));
+                canvas.height = Math.max(1, Math.floor(viewport.height));
+
+                const task = page.render({ canvasContext: canvas.getContext('2d'), viewport });
+                box._task = task;
+                await task.promise;
+                box._task = null;
+                if (seq !== pdf.seq) return;
+
+                box.innerHTML = '';
+                box.appendChild(canvas);
+            } catch (err) {
+                if (!err || err.name !== 'RenderingCancelledException') {
+                    console.warn('[PDF] Failed to render page', pageNumber, err);
+                }
+                box._rendered = false;
+            }
+        }
+
+        // Ctrl/Cmd + wheel zooms (trackpad pinch arrives this way); a plain
+        // wheel is left alone so it keeps scrolling the document.
+        function onWheel(event) {
+            if (!event.ctrlKey && !event.metaKey) return;
+            event.preventDefault();
+            zoomBy(event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP);
+        }
+
+        function attachPinchZoom(el) {
+            let startDistance = 0;
+            let startScale = 1;
+
+            const distance = (touches) => Math.hypot(
+                touches[0].clientX - touches[1].clientX,
+                touches[0].clientY - touches[1].clientY
+            );
+
+            el.addEventListener('touchstart', (event) => {
+                if (event.touches.length !== 2 || !pdf.doc) return;
+                startDistance = distance(event.touches);
+                startScale = pdf.scale;
+            }, { passive: true });
+
+            el.addEventListener('touchmove', (event) => {
+                if (event.touches.length !== 2 || !startDistance || !pdf.doc) return;
+                event.preventDefault();
+                setScale(startScale * (distance(event.touches) / startDistance), 'manual');
+            }, { passive: false });
+
+            el.addEventListener('touchend', () => { startDistance = 0; }, { passive: true });
+        }
+
+        function nativeEmbedFallback(url) {
+            const link = url + '#view=Fit&pagemode=none';
+            documentHolder.innerHTML = `
+                <object class="native-pdf-object" data="${link}" type="application/pdf">
+                    <iframe class="native-pdf-object" src="${link}" allow="autoplay"></iframe>
+                </object>
+            `;
+        }
+
+        async function renderDocument(url) {
+            if (!window.pdfjsLib) {
+                console.warn('[PDF] pdf.js unavailable; falling back to the native plugin.');
+                nativeEmbedFallback(url);
+                return;
+            }
+
+            pdf.seq++;
+            const seq = pdf.seq;
+            if (pdf.observer) { pdf.observer.disconnect(); pdf.observer = null; }
+            if (pdf.doc) { pdf.doc.destroy(); pdf.doc = null; }
+            pdf.boxes = [];
+            pdf.sizes = [];
+
+            showMessage('Loading document...');
+
+            try {
+                const doc = await pdfjsLib.getDocument({ url, withCredentials: false }).promise;
+                if (seq !== pdf.seq) { doc.destroy(); return; }
+
+                const sizes = [];
+                for (let i = 1; i <= doc.numPages; i++) {
+                    const viewport = (await doc.getPage(i)).getViewport({ scale: 1 });
+                    sizes.push({ width: viewport.width, height: viewport.height });
+                }
+                if (seq !== pdf.seq) { doc.destroy(); return; }
+
+                pdf.doc = doc;
+                pdf.sizes = sizes;
+
+                buildViewerShell();
+                pdf.boxes = sizes.map((_, i) => {
+                    const box = document.createElement('div');
+                    box.className = 'pdf-page';
+                    box.dataset.page = String(i + 1);
+                    pdf.pagesEl.appendChild(box);
+                    return box;
+                });
+
+                if ('IntersectionObserver' in window) {
+                    pdf.observer = new IntersectionObserver((entries) => {
+                        entries.forEach(entry => {
+                            if (!entry.isIntersecting) return;
+                            const box = entry.target;
+                            renderPage(box, parseInt(box.dataset.page, 10), pdf.seq);
+                        });
+                    }, { root: pdf.scrollEl, rootMargin: '300px 0px' });
+                }
+
+                pdf.mode = 'fit-page';
+                pdf.scale = fitPageScale();
+                layoutPages();
+            } catch (err) {
+                if (seq !== pdf.seq) return;
+                console.warn('[PDF] pdf.js could not open the document; falling back.', err);
+                nativeEmbedFallback(url);
+            }
+        }
+
+        // Keep the fit modes honest when the embed is resized (Squarespace
+        // reflow, phone rotation) and re-clamp a manual zoom so it can never be
+        // left narrower than the new viewport with a stale horizontal scroll.
+        let resizeTimer = null;
+        window.addEventListener('resize', () => {
+            if (!pdf.doc || !pdf.scrollEl) return;
+            clearTimeout(resizeTimer);
+            resizeTimer = setTimeout(() => {
+                const target = pdf.mode === 'fit-width' ? fitWidthScale()
+                    : pdf.mode === 'fit-page' ? fitPageScale()
+                    : clampScale(pdf.scale);
+                pdf.scale = target;
+                layoutPages();
+            }, 150);
+        });
+
         function switchOW(dateKey) {
             const fileData = masterDatabase[dateKey];
             if (!fileData) return;
@@ -416,12 +863,7 @@
             statusBar.style.display = 'none';
             openNewTabBtn.href = fileData.url;
 
-            const fileTargetLink = fileData.url + '#view=Fit&pagemode=none';
-            documentHolder.innerHTML = `
-                <object class="native-pdf-object" data="${fileTargetLink}" type="application/pdf">
-                    <iframe class="native-pdf-object" src="${fileTargetLink}" allow="autoplay"></iframe>
-                </object>
-            `;
+            renderDocument(fileData.url);
 
             // FIXED: Rewrites the browser URL to mimic a real clean subdirectory mask flawlessly!
             if (window.location.protocol !== 'file:') {
