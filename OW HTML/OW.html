@@ -695,14 +695,15 @@
             });
         }
 
-        // Marks every page as needing a repaint at the current scale. The
+        // Marks every page as needing a repaint at the current scale. Bumping
+        // the sequence is what invalidates them -- each box records the pass
+        // that claimed it, so there is no stale flag to get stranded. The
         // stretched canvases deliberately stay on screen as stand-ins until
         // their replacements are ready, so zooming never flashes blank pages.
         function invalidateRenders() {
             pdf.seq++;
             pdf.boxes.forEach(box => {
                 if (box._task) { try { box._task.cancel(); } catch (e) {} box._task = null; }
-                box._rendered = false;
             });
             return pdf.seq;
         }
@@ -754,12 +755,29 @@
 
             // Whatever is on screen right now gets painted immediately; the
             // observer picks up the rest as the reader scrolls.
+            renderVisible(seq);
             if (pdf.observer) {
                 pdf.boxes.forEach(box => pdf.observer.unobserve(box));
                 pdf.boxes.forEach(box => pdf.observer.observe(box));
-            } else {
-                pdf.boxes.forEach((box, i) => renderPage(box, i + 1, seq));
             }
+        }
+
+        // Paints the pages currently in view. The observer covers scrolling,
+        // but it only fires on an intersection *change* -- after a zoom the
+        // visible pages may not cross a threshold at all, which would leave
+        // them stretched or blank until the reader happened to scroll.
+        function renderVisible(seq) {
+            if (!pdf.doc || !pdf.scrollEl) return;
+            const pass = seq || pdf.seq;
+            const top = pdf.scrollEl.scrollTop - 300;
+            const bottom = pdf.scrollEl.scrollTop + pdf.scrollEl.clientHeight + 300;
+            const gap = parseFloat(getComputedStyle(pdf.pagesEl).rowGap) || 0;
+            let offset = pagesPadding().top;
+            pdf.boxes.forEach((box, i) => {
+                const height = box.offsetHeight;
+                if (offset + height >= top && offset <= bottom) renderPage(box, i + 1, pass);
+                offset += height + gap;
+            });
         }
 
         // The whole point of the exercise: horizontal scrolling exists only
@@ -800,8 +818,8 @@
         }
 
         async function renderPage(box, pageNumber, seq) {
-            if (box._rendered || seq !== pdf.seq) return;
-            box._rendered = true;
+            if (seq !== pdf.seq || box._renderSeq === seq) return;
+            box._renderSeq = seq;
             try {
                 const page = await pdf.doc.getPage(pageNumber);
                 if (seq !== pdf.seq) return;
@@ -824,7 +842,8 @@
                 if (!err || err.name !== 'RenderingCancelledException') {
                     console.warn('[PDF] Failed to render page', pageNumber, err);
                 }
-                box._rendered = false;
+                // Release the claim so a later pass can try this page again.
+                if (box._renderSeq === seq) box._renderSeq = null;
             }
         }
 
