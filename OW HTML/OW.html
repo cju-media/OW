@@ -295,13 +295,7 @@
                 let timeStr = "";
                 let displayTime = "";
                 if (timeMatch) {
-                    let hour = parseInt(timeMatch[1], 10);
-                    let isPm = timeMatch[2].toLowerCase() === 'pm';
-                    if (isPm && hour < 12) hour += 12;
-                    if (!isPm && hour === 12) hour = 0;
-
-                    let hourStr = hour.toString().padStart(2, '0');
-                    timeStr = `-${hourStr}00`;
+                    timeStr = `-${timeMatch[1]}${timeMatch[2].toLowerCase()}`;
                     displayTime = ` ${timeMatch[1]}${timeMatch[2].toLowerCase()}`;
                 }
 
@@ -325,13 +319,7 @@
                 let timeStr = "";
                 let displayTime = "";
                 if (timeMatch) {
-                    let hour = parseInt(timeMatch[1], 10);
-                    let isPm = timeMatch[2].toLowerCase() === 'pm';
-                    if (isPm && hour < 12) hour += 12;
-                    if (!isPm && hour === 12) hour = 0;
-
-                    let hourStr = hour.toString().padStart(2, '0');
-                    timeStr = `-${hourStr}00`;
+                    timeStr = `-${timeMatch[1]}${timeMatch[2].toLowerCase()}`;
                     displayTime = ` ${timeMatch[1]}${timeMatch[2].toLowerCase()}`;
                 }
 
@@ -342,6 +330,12 @@
         }
 
         function extractCleanDateKey(filename) {
+            // Legacy 24-hour links (12-24-25-2300) -> 12-hour form (12-24-25-11pm)
+            const legacy = filename && filename.match(/^(\d{1,2}[-.]\d{1,2}[-.]\d{2,4})-(\d{2})00$/);
+            if (legacy) {
+                const h = parseInt(legacy[2], 10);
+                filename = `${legacy[1]}-${h % 12 || 12}${h < 12 ? 'am' : 'pm'}`;
+            }
             const info = parseDateInfo(filename);
             if (!info) return null;
             if (info.key) return info.key;
@@ -380,15 +374,31 @@
             return extractCleanDateKey(dateSlug);
         }
 
+        // Key time suffixes are 12-hour Pacific ("11pm"); this returns the
+        // 24-hour HHMM number (2300) for sorting and time math. Also accepts
+        // the legacy 24-hour form ("2300") so old links keep working.
+        function timeSuffixToHHMM(part) {
+            if (!part) return 0;
+            const m = String(part).match(/^(\d{1,2})(am|pm)$/i);
+            if (!m) return parseInt(part, 10) || 0;
+            let hour = parseInt(m[1], 10);
+            const isPm = m[2].toLowerCase() === 'pm';
+            if (isPm && hour < 12) hour += 12;
+            if (!isPm && hour === 12) hour = 0;
+            return hour * 100;
+        }
+
         function sortKeysChronologically(keys) {
             keys.sort((a, b) => {
-                const pA = a.split('-').map(Number);
-                const pB = b.split('-').map(Number);
+                const sA = a.split('-');
+                const sB = b.split('-');
+                const pA = sA.map(Number);
+                const pB = sB.map(Number);
                 if (pA[2] !== pB[2]) return pB[2] - pA[2]; // year
                 if (pA[0] !== pB[0]) return pB[0] - pA[0]; // month
                 if (pA[1] !== pB[1]) return pB[1] - pA[1]; // day
-                const tA = pA[3] || 0;
-                const tB = pB[3] || 0;
+                const tA = timeSuffixToHHMM(sA[3]);
+                const tB = timeSuffixToHHMM(sB[3]);
                 return tB - tA; // time
             });
         }
@@ -425,7 +435,7 @@
             const year = parseInt(parts[2], 10);
             const month = parseInt(parts[0], 10);
             const day = parseInt(parts[1], 10);
-            const timePart = parts.length > 3 ? parseInt(parts[3], 10) : null;
+            const timePart = parts.length > 3 ? timeSuffixToHHMM(parts[3]) : null;
 
             const pad = (num) => String(num).padStart(2, '0');
             const targetKey = `20${pad(year)}${pad(month)}${pad(day)}`;
@@ -1148,7 +1158,7 @@
                             // Iterate from oldest to newest (reverse of keysForDay since keysForDay is newest to oldest)
                             for (let i = keysForDay.length - 1; i >= 0; i--) {
                                 const key = keysForDay[i];
-                                const t = parseInt(key.split('-')[3] || '0', 10);
+                                const t = timeSuffixToHHMM(key.split('-')[3]);
                                 const hour = Math.floor(t / 100);
                                 const minute = t % 100;
 
@@ -1166,8 +1176,8 @@
 
                             // Only add services up to the active one (hide future ones)
                             keysForDay.forEach(key => {
-                                const t1 = parseInt(key.split('-')[3] || '0', 10);
-                                const tActive = parseInt(activeKeyForDay.split('-')[3] || '0', 10);
+                                const t1 = timeSuffixToHHMM(key.split('-')[3]);
+                                const tActive = timeSuffixToHHMM(activeKeyForDay.split('-')[3]);
                                 if (t1 <= tActive) {
                                     visibleKeys.push(key);
                                 }

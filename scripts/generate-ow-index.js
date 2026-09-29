@@ -16,13 +16,7 @@ function parseDateFromName(filename, filepath) {
         let timeStr = "";
         let displayTime = "";
         if (timeMatch) {
-            let hour = parseInt(timeMatch[1], 10);
-            let isPm = timeMatch[2].toLowerCase() === 'pm';
-            if (isPm && hour < 12) hour += 12;
-            if (!isPm && hour === 12) hour = 0;
-
-            let hourStr = hour.toString().padStart(2, '0');
-            timeStr = `-${hourStr}00`;
+            timeStr = `-${timeMatch[1]}${timeMatch[2].toLowerCase()}`;
             displayTime = ` ${timeMatch[1]}${timeMatch[2].toLowerCase()}`;
         }
 
@@ -63,13 +57,7 @@ function parseDateFromName(filename, filepath) {
         let timeStr = "";
         let displayTime = "";
         if (timeMatch) {
-            let hour = parseInt(timeMatch[1], 10);
-            let isPm = timeMatch[2].toLowerCase() === 'pm';
-            if (isPm && hour < 12) hour += 12;
-            if (!isPm && hour === 12) hour = 0;
-
-            let hourStr = hour.toString().padStart(2, '0');
-            timeStr = `-${hourStr}00`;
+            timeStr = `-${timeMatch[1]}${timeMatch[2].toLowerCase()}`;
             displayTime = ` ${timeMatch[1]}${timeMatch[2].toLowerCase()}`;
         }
 
