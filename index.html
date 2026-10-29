@@ -201,14 +201,14 @@
                 // Check for standard format
                 const match = decodedName.match(/^(\d{1,2})[-.](\d{1,2})[-.](\d{2,4})/);
                 if (match) {
-                    let timeMatch = decodedName.match(/(\d{1,2})\s*(am|pm)/i);
+                    let timeMatch = decodedName.match(/(\d{1,2})(?::?(\d{2}))?\s*(am|pm)/i);
                     let time = 0;
                     if (timeMatch) {
                         let hour = parseInt(timeMatch[1], 10);
-                        let isPm = timeMatch[2].toLowerCase() === 'pm';
+                        let isPm = timeMatch[3].toLowerCase() === 'pm';
                         if (isPm && hour < 12) hour += 12;
                         if (!isPm && hour === 12) hour = 0;
-                        time = hour * 100;
+                        time = hour * 100 + (parseInt(timeMatch[2], 10) || 0);
                     }
 
                     return {
@@ -229,14 +229,14 @@
                         year = parseInt(yearStrMatch[1], 10) % 100;
                     }
 
-                    let timeMatch = decodedName.match(/(\d{1,2})\s*(am|pm)/i);
+                    let timeMatch = decodedName.match(/(\d{1,2})(?::?(\d{2}))?\s*(am|pm)/i);
                     let time = 0;
                     if (timeMatch) {
                         let hour = parseInt(timeMatch[1], 10);
-                        let isPm = timeMatch[2].toLowerCase() === 'pm';
+                        let isPm = timeMatch[3].toLowerCase() === 'pm';
                         if (isPm && hour < 12) hour += 12;
                         if (!isPm && hour === 12) hour = 0;
-                        time = hour * 100;
+                        time = hour * 100 + (parseInt(timeMatch[2], 10) || 0);
                     }
 
                     if (year === null) {
