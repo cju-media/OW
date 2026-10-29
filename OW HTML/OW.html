@@ -291,12 +291,16 @@
                 let year = parseInt(match[3], 10);
                 if (year > 1000) year = year % 100;
 
-                let timeMatch = filename.match(/(\d{1,2})\s*(am|pm)/i);
+                // "5pm", "5:30pm" or "530pm". Minutes stay in the key ("530pm") so a
+                // 5:30 service doesn't come out as "30pm"; on-the-hour keys are unchanged.
+                let timeMatch = filename.match(/(\d{1,2})(?::?(\d{2}))?\s*(am|pm)/i);
                 let timeStr = "";
                 let displayTime = "";
                 if (timeMatch) {
-                    timeStr = `-${timeMatch[1]}${timeMatch[2].toLowerCase()}`;
-                    displayTime = ` ${timeMatch[1]}${timeMatch[2].toLowerCase()}`;
+                    const mins = timeMatch[2] && timeMatch[2] !== '00' ? timeMatch[2] : '';
+                    const ampm = timeMatch[3].toLowerCase();
+                    timeStr = `-${timeMatch[1]}${mins}${ampm}`;
+                    displayTime = ` ${timeMatch[1]}${mins ? ':' + mins : ''}${ampm}`;
                 }
 
                 let k = `${month}-${day}-${year}${timeStr}`;
@@ -315,12 +319,16 @@
                 let month = 12;
                 let day = 24;
 
-                let timeMatch = filename.match(/(\d{1,2})\s*(am|pm)/i);
+                // "5pm", "5:30pm" or "530pm". Minutes stay in the key ("530pm") so a
+                // 5:30 service doesn't come out as "30pm"; on-the-hour keys are unchanged.
+                let timeMatch = filename.match(/(\d{1,2})(?::?(\d{2}))?\s*(am|pm)/i);
                 let timeStr = "";
                 let displayTime = "";
                 if (timeMatch) {
-                    timeStr = `-${timeMatch[1]}${timeMatch[2].toLowerCase()}`;
-                    displayTime = ` ${timeMatch[1]}${timeMatch[2].toLowerCase()}`;
+                    const mins = timeMatch[2] && timeMatch[2] !== '00' ? timeMatch[2] : '';
+                    const ampm = timeMatch[3].toLowerCase();
+                    timeStr = `-${timeMatch[1]}${mins}${ampm}`;
+                    displayTime = ` ${timeMatch[1]}${mins ? ':' + mins : ''}${ampm}`;
                 }
 
                 return { keyBase: `${month}-${day}-`, timeStr, displayTime, needsYear: year === null, year, originalFilename: filename };
@@ -330,11 +338,12 @@
         }
 
         function extractCleanDateKey(filename) {
-            // Legacy 24-hour links (12-24-25-2300) -> 12-hour form (12-24-25-11pm)
-            const legacy = filename && filename.match(/^(\d{1,2}[-.]\d{1,2}[-.]\d{2,4})-(\d{2})00$/);
+            // Legacy 24-hour links (12-24-25-2300, 12-24-26-1730) -> 12-hour form (11pm, 530pm)
+            const legacy = filename && filename.match(/^(\d{1,2}[-.]\d{1,2}[-.]\d{2,4})-(\d{2})(\d{2})$/);
             if (legacy) {
                 const h = parseInt(legacy[2], 10);
-                filename = `${legacy[1]}-${h % 12 || 12}${h < 12 ? 'am' : 'pm'}`;
+                const mins = legacy[3] !== '00' ? legacy[3] : '';
+                filename = `${legacy[1]}-${h % 12 || 12}${mins}${h < 12 ? 'am' : 'pm'}`;
             }
             const info = parseDateInfo(filename);
             if (!info) return null;
@@ -374,18 +383,18 @@
             return extractCleanDateKey(dateSlug);
         }
 
-        // Key time suffixes are 12-hour Pacific ("11pm"); this returns the
-        // 24-hour HHMM number (2300) for sorting and time math. Also accepts
-        // the legacy 24-hour form ("2300") so old links keep working.
+        // Key time suffixes are 12-hour Pacific ("11pm", or "530pm" for 5:30);
+        // this returns the 24-hour HHMM number (2300, 1730) for sorting and time
+        // math. Also accepts the legacy 24-hour form ("2300") so old links keep working.
         function timeSuffixToHHMM(part) {
             if (!part) return 0;
-            const m = String(part).match(/^(\d{1,2})(am|pm)$/i);
+            const m = String(part).match(/^(\d{1,2}?)(\d{2})?(am|pm)$/i);
             if (!m) return parseInt(part, 10) || 0;
             let hour = parseInt(m[1], 10);
-            const isPm = m[2].toLowerCase() === 'pm';
+            const isPm = m[3].toLowerCase() === 'pm';
             if (isPm && hour < 12) hour += 12;
             if (!isPm && hour === 12) hour = 0;
-            return hour * 100;
+            return hour * 100 + (parseInt(m[2], 10) || 0);
         }
 
         function sortKeysChronologically(keys) {
