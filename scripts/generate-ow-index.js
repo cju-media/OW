@@ -12,12 +12,16 @@ function parseDateFromName(filename, filepath) {
         let year = parseInt(match[3], 10);
         if (year > 1000) year = year % 100;
 
-        let timeMatch = filename.match(/(\d{1,2})\s*(am|pm)/i);
+        // "5pm", "5:30pm" or "530pm". Minutes stay in the key ("530pm") so a
+        // 5:30 service doesn't come out as "30pm"; on-the-hour keys are unchanged.
+        let timeMatch = filename.match(/(\d{1,2})(?::?(\d{2}))?\s*(am|pm)/i);
         let timeStr = "";
         let displayTime = "";
         if (timeMatch) {
-            timeStr = `-${timeMatch[1]}${timeMatch[2].toLowerCase()}`;
-            displayTime = ` ${timeMatch[1]}${timeMatch[2].toLowerCase()}`;
+            const mins = timeMatch[2] && timeMatch[2] !== '00' ? timeMatch[2] : '';
+            const ampm = timeMatch[3].toLowerCase();
+            timeStr = `-${timeMatch[1]}${mins}${ampm}`;
+            displayTime = ` ${timeMatch[1]}${mins ? ':' + mins : ''}${ampm}`;
         }
 
         return {
@@ -53,12 +57,16 @@ function parseDateFromName(filename, filepath) {
         let month = 12;
         let day = 24;
 
-        let timeMatch = filename.match(/(\d{1,2})\s*(am|pm)/i);
+        // "5pm", "5:30pm" or "530pm". Minutes stay in the key ("530pm") so a
+        // 5:30 service doesn't come out as "30pm"; on-the-hour keys are unchanged.
+        let timeMatch = filename.match(/(\d{1,2})(?::?(\d{2}))?\s*(am|pm)/i);
         let timeStr = "";
         let displayTime = "";
         if (timeMatch) {
-            timeStr = `-${timeMatch[1]}${timeMatch[2].toLowerCase()}`;
-            displayTime = ` ${timeMatch[1]}${timeMatch[2].toLowerCase()}`;
+            const mins = timeMatch[2] && timeMatch[2] !== '00' ? timeMatch[2] : '';
+            const ampm = timeMatch[3].toLowerCase();
+            timeStr = `-${timeMatch[1]}${mins}${ampm}`;
+            displayTime = ` ${timeMatch[1]}${mins ? ':' + mins : ''}${ampm}`;
         }
 
         return {
